@@ -106,6 +106,9 @@ export interface GeneralParameterReportData {
   // timeline (DPR N = Actual Start + (N-1) working days), by explicit
   // request — e.g. started 8 Sep, 4 DPRs at 25% -> 11 Sep. Null = not done.
   effectiveActualEndDate: string | null;
+  // Post Construction's Cumulative Delay (Preconstruction + Construction =
+  // Total) — see computeStageDelays.
+  stageDelays: StageDelays;
 }
 
 function parseDateKeyUtc(value: string): Date {
@@ -115,7 +118,54 @@ function toDateKeyUtc(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
-async function fetchBlockedDates(years: Set<number>): Promise<Set<string>> {
+// Post Construction's Cumulative Delay, shared with the Daily/Weekly/
+// Monthly/Custom reports (dprActivityReport.ts) so both always show the
+// same numbers. Working days, as of `asOf` (today here):
+//   pre — Planned Start → Actual Start (or asOf if not started yet).
+//   construction — not started: 0. Finished: working days actually taken
+//     beyond the planned working days. Open: the earned-progress shortfall
+//     (expected-by-asOf % minus the DPRs' real %, in day-equivalents).
+//   total — the two added together.
+export interface StageDelays {
+  preDays: number;
+  constructionDays: number;
+  totalDays: number;
+}
+
+export function computeStageDelays(input: {
+  plannedStart: string | null;
+  due: string | null;
+  actualStart: string | null;
+  actualEnd: string | null;
+  cumulativePercent: number;
+  asOf: string;
+  blocked: Set<string>;
+}): StageDelays {
+  const { plannedStart, due, actualStart, actualEnd, cumulativePercent, asOf, blocked } = input;
+  const plannedWorkingDays = plannedStart && due ? countWorkingDaysBetween(parseDateKeyUtc(plannedStart), parseDateKeyUtc(due), blocked) : null;
+
+  let preDays = 0;
+  if (plannedStart) {
+    const compareEnd = parseDateKeyUtc(actualStart ?? asOf);
+    const start = parseDateKeyUtc(plannedStart);
+    if (compareEnd > start) preDays = Math.max(0, workingDaysBetween(start, compareEnd, blocked));
+  }
+
+  let constructionDays = 0;
+  if (actualStart && plannedWorkingDays) {
+    if (actualEnd) {
+      constructionDays = Math.max(0, countWorkingDaysBetween(parseDateKeyUtc(actualStart), parseDateKeyUtc(actualEnd), blocked) - plannedWorkingDays);
+    } else if (plannedStart) {
+      const elapsed = Math.min(plannedWorkingDays, countWorkingDaysBetween(parseDateKeyUtc(plannedStart), parseDateKeyUtc(asOf), blocked));
+      const dailyRatePercent = 100 / plannedWorkingDays;
+      const shortfall = Math.max(0, elapsed * dailyRatePercent - cumulativePercent);
+      constructionDays = Math.round((shortfall / dailyRatePercent) * 10) / 10;
+    }
+  }
+  return { preDays, constructionDays, totalDays: Math.round((preDays + constructionDays) * 10) / 10 };
+}
+
+export async function fetchBlockedDates(years: Set<number>): Promise<Set<string>> {
   const blocked = new Set<string>();
   if (years.size === 0) return blocked;
   const minYear = Math.min(...years);
@@ -287,8 +337,19 @@ export async function fetchGeneralParameterReport(taskId: string, projectId: str
     effectiveActualEndDate = toDateKeyUtc(cursor);
   }
 
+  const stageDelays = computeStageDelays({
+    plannedStart: base.plannedStartDate,
+    due: base.dueDate,
+    actualStart: base.actualStartDate,
+    actualEnd: effectiveActualEndDate,
+    cumulativePercent: cumulativePercentComplete,
+    asOf: todayKey,
+    blocked,
+  });
+
   return {
     effectiveActualEndDate,
+    stageDelays,
     base,
     plannedWorkingDays,
     preconstructionDelayDays,

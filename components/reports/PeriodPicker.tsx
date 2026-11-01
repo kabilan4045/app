@@ -39,13 +39,13 @@ export function PeriodPicker({ mode, range, onChange }: PeriodPickerProps) {
       : MONTHS.map((m, i) => ({ label: m, sub: null as string | null, range: monthRange(year, i) }));
 
   return (
-    <Card className="mb-2 p-3">
-      <View className="flex-row items-center justify-between mb-2">
-        <Pressable onPress={() => step(-1)} hitSlop={10} className="p-1">
+    <Card className="mb-2" style={{ paddingHorizontal: 10, paddingVertical: 8 }}>
+      <View className="flex-row items-center justify-between mb-1.5">
+        <Pressable onPress={() => step(-1)} hitSlop={10} className="px-1">
           <Ionicons name="chevron-back" size={18} color="#0F1F33" />
         </Pressable>
         <Text className="text-sm font-bold text-neutral-900">{mode === 'week' ? `${MONTHS_LONG[month0]} ${year}` : year}</Text>
-        <Pressable onPress={() => step(1)} hitSlop={10} className="p-1">
+        <Pressable onPress={() => step(1)} hitSlop={10} className="px-1">
           <Ionicons name="chevron-forward" size={18} color="#0F1F33" />
         </Pressable>
       </View>
@@ -58,7 +58,7 @@ export function PeriodPicker({ mode, range, onChange }: PeriodPickerProps) {
               key={p.range.from}
               disabled={future}
               onPress={() => onChange(p.range)}
-              className={`items-center rounded-lg px-2.5 py-1.5 border ${
+              className={`items-center rounded-lg px-2 py-1 border ${
                 selected ? 'bg-[#0F1F33] border-[#0F1F33]' : 'bg-white border-neutral-200'
               } ${future ? 'opacity-40' : ''}`}
               style={{ minWidth: mode === 'week' ? '18%' : '22%', flexGrow: 1 }}

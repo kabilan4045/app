@@ -1,6 +1,7 @@
 import { supabase } from '../supabase';
 import { isPilotVisible } from '../pilot';
 import { classifyAccountabilityType } from './accountability';
+import { nextGlobalTaskCode, nextTaskCode } from '../taskCodes';
 import type {
   AccountabilityType,
   DependencyType,
@@ -346,6 +347,7 @@ export async function fetchDependencyTemplate(): Promise<DependencyTemplateEntry
 }
 
 export interface CreateTaskInput {
+  projectId: string;
   workId: string;
   workCode: string;
   taskName: string;
@@ -355,11 +357,20 @@ export interface CreateTaskInput {
   dueDate: string;
 }
 
-// taskId generation matches admin-web's createTaskCore exactly
-// (`${workCode}-${last 6 digits of Date.now()}`) — same human-readable-code
-// convention on both platforms, not a separate scheme invented for mobile.
+// taskId is the project's next sequential TASK-### code (see
+// lib/taskCodes.ts). A unique-violation (another device created a task in
+// the same moment, or task_id is unique across projects) retries once with
+// the next code after every project's max.
 export async function createTask(input: CreateTaskInput): Promise<FlowchartTask> {
-  const taskId = `${input.workCode}-${Date.now().toString().slice(-6)}`;
+  try {
+    return await insertTask(input, await nextTaskCode(input.projectId));
+  } catch (err) {
+    if ((err as { code?: string }).code !== '23505') throw err;
+    return insertTask(input, await nextGlobalTaskCode());
+  }
+}
+
+async function insertTask(input: CreateTaskInput, taskId: string): Promise<FlowchartTask> {
   const { data, error } = await supabase
     .from('tasks')
     .insert({
@@ -392,7 +403,7 @@ export async function createTask(input: CreateTaskInput): Promise<FlowchartTask>
       work:works!inner(id, name, code, accountability_type, project_id)
     `)
     .single();
-  if (error) throw new Error(error.message);
+  if (error) throw Object.assign(new Error(error.message), { code: error.code });
 
   const work = Array.isArray(data.work) ? data.work[0] : data.work;
   return {

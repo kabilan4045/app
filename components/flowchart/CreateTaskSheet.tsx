@@ -12,6 +12,7 @@ import {
   type WorkOption,
 } from '../../lib/flowchart/data';
 import { addDaysToKey, createSubtask } from '../../lib/dprEntries';
+import { nextTaskCode, suggestDepartmentId } from '../../lib/taskCodes';
 import type { DependencyType, FlowchartSeriesEdge, FlowchartTask, TaskTypeOption } from '../../lib/flowchart/types';
 
 // taskTypes (prop) is fetched ordered by default_duration_days ascending —
@@ -65,7 +66,11 @@ export function CreateTaskSheet({
   const [loadingWorks, setLoadingWorks] = useState(true);
 
   const [workId, setWorkId] = useState<string | null>(null);
+  // Once the department is tapped by hand, the task-name auto-suggest
+  // stops overriding it.
+  const [workPicked, setWorkPicked] = useState(false);
   const [taskName, setTaskName] = useState('');
+  const [previewCode, setPreviewCode] = useState<string | null>(null);
   const [description, setDescription] = useState('');
   const [taskTypeId, setTaskTypeId] = useState<string | null>(null);
   const [plannedStartDate, setPlannedStartDate] = useState<string | null>(null);
@@ -104,7 +109,15 @@ export function CreateTaskSheet({
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoadingWorks(false));
+    nextTaskCode(projectId).then(setPreviewCode).catch(() => {});
   }, [projectId]);
+
+  function handleTaskNameChange(name: string) {
+    setTaskName(name);
+    if (workPicked) return;
+    const suggested = suggestDepartmentId(name, works);
+    if (suggested) setWorkId(suggested);
+  }
 
   const selectedWork = works.find((w) => w.id === workId);
   const selectedTaskType = taskTypes.find((t) => t.id === taskTypeId);
@@ -127,6 +140,7 @@ export function CreateTaskSheet({
     setError(null);
     try {
       const newTask = await createTask({
+        projectId,
         workId,
         workCode: selectedWork.code,
         taskName: taskName.trim(),
@@ -183,7 +197,14 @@ export function CreateTaskSheet({
         <Pressable onPress={() => {}} style={{ width: '100%', maxWidth: 400, maxHeight: '88%' }}>
           <Card>
             <ScrollView showsVerticalScrollIndicator={false}>
-              <Text className="text-sm font-bold text-neutral-900 mb-3">New Task</Text>
+              <View className="flex-row items-center justify-between mb-3">
+                <Text className="text-sm font-bold text-neutral-900">New Task</Text>
+                {previewCode && (
+                  <View className="px-2 py-0.5 rounded-md bg-neutral-100">
+                    <Text className="text-2xs font-bold text-neutral-600">Task ID: {previewCode}</Text>
+                  </View>
+                )}
+              </View>
 
               {error && (
                 <View className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 mb-3">
@@ -191,7 +212,7 @@ export function CreateTaskSheet({
                 </View>
               )}
 
-              <Text className="text-xs text-neutral-400 mb-1">Department *</Text>
+              <Text className="text-xs text-neutral-400 mb-1">Department * <Text className="text-2xs">(auto-picked from the task name)</Text></Text>
               {loadingWorks ? (
                 <ActivityIndicator size="small" color="#0F1F33" style={{ marginBottom: 12, alignSelf: 'flex-start' }} />
               ) : (
@@ -201,7 +222,7 @@ export function CreateTaskSheet({
                     return (
                       <Pressable
                         key={w.id}
-                        onPress={() => setWorkId(w.id)}
+                        onPress={() => { setWorkId(w.id); setWorkPicked(true); }}
                         className={`px-2.5 py-1.5 rounded-full ${active ? 'bg-brand-navy' : 'bg-neutral-100'}`}
                       >
                         <Text className={`text-2xs font-semibold ${active ? 'text-white' : 'text-neutral-600'}`}>{w.name}</Text>
@@ -214,7 +235,7 @@ export function CreateTaskSheet({
               <Text className="text-xs text-neutral-400 mb-1">Task Name *</Text>
               <TextInput
                 value={taskName}
-                onChangeText={setTaskName}
+                onChangeText={handleTaskNameChange}
                 placeholder="e.g. Column starter casting"
                 className="border border-neutral-200 rounded-lg px-3 py-2 text-sm text-neutral-900 mb-3"
               />

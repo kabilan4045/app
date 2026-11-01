@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Pressable, RefreshControl, ScrollView, Text, View } from 'react-native';
-import { Redirect, Stack, router, useLocalSearchParams } from 'expo-router';
+import { Redirect, Stack, router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../lib/AuthContext';
 import { useProject } from '../../lib/ProjectContext';
@@ -69,9 +69,12 @@ export default function GeneralParameterReportScreen() {
     }
   }, [selectedProjectId, selectedTaskId]);
 
-  useEffect(() => {
-    loadReport();
-  }, [loadReport]);
+  // On focus too — returning from Edit DPR shows the edited figures.
+  useFocusEffect(
+    useCallback(() => {
+      loadReport();
+    }, [loadReport])
+  );
 
   useEffect(() => {
     if (data) setPickersExpanded(false);
@@ -177,7 +180,20 @@ export default function GeneralParameterReportScreen() {
               subtitle="It may not belong to this project, or may have been deleted."
             />
           ) : (
-            <GeneralParameterSection data={data} />
+            <>
+              {/* Admin can open any task's DPR from here — completed ones
+                  too, which drop off the DPR list — to edit and resubmit. */}
+              {state.profile.role === 'admin' && (
+                <Pressable
+                  onPress={() => router.push(`/dpr-edit/${data.base.task.id}`)}
+                  className="flex-row items-center justify-center gap-1.5 mb-3 py-2.5 rounded-xl bg-brand-navy"
+                >
+                  <Ionicons name="create-outline" size={16} color="#fff" />
+                  <Text className="text-sm font-bold text-white">Edit DPR</Text>
+                </Pressable>
+              )}
+              <GeneralParameterSection data={data} />
+            </>
           )}
         </ScrollView>
       )}

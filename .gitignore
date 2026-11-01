@@ -51,3 +51,6 @@ scripts/.seed-demo-dprs.json
 *.aab
 *.apk
 supabase/.temp/
+scripts/.backfill-task-codes.json
+scripts/.seed-demo-stages.json
+scripts/.seed-demo-checklists.json

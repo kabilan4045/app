@@ -115,6 +115,7 @@ export interface DprTask {
   plannedStartDate: string | null;
   plannedEndDate: string | null;
   actualStartDate: string | null;
+  actualEndDate: string | null;
   // Real Quantity of Work — the 'Quantity Of Work Done' DependencyItem
   // (category='quantity'), NOT Task.totalSft/sft_progress_entries. Null
   // quantityItemId means this task has no such checklist item at all
@@ -227,6 +228,7 @@ function toDprTask(row: RawTaskRow, todayKey: string): DprTask {
     plannedStartDate,
     plannedEndDate,
     actualStartDate: row.actual_start_date,
+    actualEndDate: row.actual_end_date,
     quantityItemId: quantityItem?.id ?? null,
     quantityDone: quantityItem?.quantity_value != null ? Number(quantityItem.quantity_value) : null,
     quantityUnit: quantityItem?.quantity_unit ?? null,
@@ -856,5 +858,16 @@ export function buildFullDayEntryList(real: DprHistoryEntry[], startKey: string 
   if (startKey && endKey && startKey <= endKey) {
     for (let k = startKey; k <= endKey; k = addDaysToKey(k, 1)) keys.add(k);
   }
-  return [...keys].sort().map((k) => byDate.get(k) ?? { reportDate: k, fields: EMPTY_ENTRY });
+  return withNextDprDay([...keys].sort().map((k) => byDate.get(k) ?? { reportDate: k, fields: EMPTY_ENTRY }));
+}
+
+// A task running past its planned days keeps getting DPR days, by explicit
+// request: once every day so far has a % filled in and they add up to less
+// than 100%, one more empty day is added after the last — so a 5-day task
+// at 60% after day 5 gets DPR 6, then 7, … until the total reaches 100%.
+export function withNextDprDay(list: DprHistoryEntry[]): DprHistoryEntry[] {
+  if (list.length === 0 || list.some((e) => e.fields.percentComplete == null)) return list;
+  const total = list.reduce((sum, e) => sum + (e.fields.percentComplete ?? 0), 0);
+  if (total >= 100) return list;
+  return [...list, { reportDate: addDaysToKey(list[list.length - 1].reportDate, 1), fields: EMPTY_ENTRY }];
 }

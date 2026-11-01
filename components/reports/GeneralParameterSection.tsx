@@ -661,7 +661,8 @@ export function buildTaskReportPdfHtml(data: GeneralParameterReportData, project
       </div>
     </section>`;
 
-  const totalDelay = data.preconstructionDelayDays + data.progressDelayDays;
+  const { constructionDays, totalDays: totalDelay } = data.stageDelays;
+  const constructionLabel = data.effectiveActualEndDate ? 'Construction (Actual Days − Planned Days)' : 'Construction (Expected Progress − Actual DPR Progress)';
   const delayColor = (n: number) => (n > 0 ? CHART_PENDING : DONE_COLOR);
   const post = `
     <section class="page">
@@ -671,7 +672,7 @@ export function buildTaskReportPdfHtml(data: GeneralParameterReportData, project
         <div class="sec">Cumulative Delay</div>
         <div class="rows">
           <div class="row"><span>Preconstruction (Planned Start − Actual Start)</span><b style="color:${delayColor(data.preconstructionDelayDays)}">${data.preconstructionDelayDays}d</b></div>
-          <div class="row"><span>Construction (Expected Progress − Actual DPR Progress)</span><b style="color:${delayColor(data.progressDelayDays)}">${data.progressDelayDays}d</b></div>
+          <div class="row"><span>${constructionLabel}</span><b style="color:${delayColor(constructionDays)}">${constructionDays}d</b></div>
           <div class="row"><span>Cumulative Total (Preconstruction + Construction)</span><b style="color:${delayColor(totalDelay)}">${totalDelay}d</b></div>
         </div>
         ${delaySection('Cumulative Reason for Delay', 'Checklist + DPR combined', cumulativeDelayByCategory, (d) => checklistItemsFor(d.category))}
@@ -988,15 +989,19 @@ export function GeneralParameterSection({ data }: { data: GeneralParameterReport
                 used (how much of the expected-by-today % hasn't actually
                 been submitted, in day-equivalents) — ~2 days pending here,
                 matching "3 done, 2 pending" for a 5-day task. */}
+            {/* data.stageDelays (shared with the Daily/Weekly/Monthly
+                reports, so both always agree) — same earned-progress figure
+                while the task is open; once finished, the working days
+                actually taken beyond the plan (the shortfall is 0 by then). */}
             <Row
-              label="Construction (Expected Progress − Actual DPR Progress)"
-              value={`${data.progressDelayDays}d`}
-              color={data.progressDelayDays > 0 ? CHART_PENDING : DONE_COLOR}
+              label={data.effectiveActualEndDate ? 'Construction (Actual Days − Planned Days)' : 'Construction (Expected Progress − Actual DPR Progress)'}
+              value={`${data.stageDelays.constructionDays}d`}
+              color={data.stageDelays.constructionDays > 0 ? CHART_PENDING : DONE_COLOR}
             />
             <Row
               label="Cumulative Total (Preconstruction + Construction)"
-              value={`${data.preconstructionDelayDays + data.progressDelayDays}d`}
-              color={data.preconstructionDelayDays + data.progressDelayDays > 0 ? CHART_PENDING : DONE_COLOR}
+              value={`${data.stageDelays.totalDays}d`}
+              color={data.stageDelays.totalDays > 0 ? CHART_PENDING : DONE_COLOR}
             />
           </>
         )}

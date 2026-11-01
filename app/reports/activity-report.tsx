@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
-import { Redirect, Stack, router, useLocalSearchParams } from 'expo-router';
+import { Redirect, Stack, router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../lib/AuthContext';
 import { useProject } from '../../lib/ProjectContext';
 import {
   fetchDprActivityReport,
+  TASK_STAGE_LABEL,
   type DprActivityReport,
-  type DprActivityRow,
   type DprActivityTask,
   type ProgressForecast,
 } from '../../lib/reports/dprActivityReport';
@@ -18,14 +18,20 @@ import {
   defaultLast7Days,
   defaultToday,
   formatDateLabel,
-  formatDayLabel,
 } from '../../lib/reports/dateRange';
 import { DateRangeBar } from '../../components/reports/DateRangeBar';
 import { PeriodPicker } from '../../components/reports/PeriodPicker';
 import { ReportProjectPicker } from '../../components/reports/ReportProjectPicker';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { downloadPrintout } from '../../lib/reports/projectPrintouts';
-import { buildActivityReportPdfHtml, entryNotes, forecastLines } from '../../lib/reports/activityReportPdf';
+import {
+  barLabels,
+  buildActivityReportPdfHtml,
+  delayReasonNames,
+  STAGE_COLOR,
+  taskDelayStatus,
+  type ForecastTone,
+} from '../../lib/reports/activityReportPdf';
 
 // The drawer's "Report by time" submenu (Daily/Weekly/Monthly/Custom
 // duration) all land here, parameterized via route params, rather than 4
@@ -53,60 +59,106 @@ const DEFAULT_RANGE_FOR_PRESET: Record<Preset, () => DateRange> = {
   custom: defaultLast7Days,
 };
 
-function ForecastLines({ f, dark }: { f: ProgressForecast; dark?: boolean }) {
-  const text = dark ? 'text-white/80' : 'text-neutral-600';
-  const toneClass = {
-    normal: text,
-    late: `font-semibold ${dark ? 'text-red-300' : 'text-red-600'}`,
-    ok: `font-semibold ${dark ? 'text-emerald-300' : 'text-emerald-600'}`,
-  };
+// The client's sketch: a bar on every card (empty if not started), with
+// "80% (39 days)" under the filled part and "20% (20 days)" under the
+// empty part, then the plan/delay line. Kept slim to save space.
+function ProgressBlock({ f, status }: { f: ProgressForecast; status: { text: string; tone: ForecastTone } }) {
+  const labels = barLabels(f);
+  const statusClass = { normal: 'text-neutral-600', late: 'text-red-600', ok: 'text-emerald-600' }[status.tone];
+  const done = Math.min(100, Math.max(0, f.percentDone));
+  const late = status.tone === 'late';
   return (
-    <View className="mt-1.5 gap-0.5">
-      {forecastLines(f).map((line, i) => (
-        <Text key={i} className={`text-2xs ${toneClass[line.tone]}`}>
-          <Text className="font-bold">{i + 1}.</Text> {line.text}
-        </Text>
-      ))}
+    <View style={{ marginTop: 4 }}>
+      <View style={{ flexDirection: 'row', height: 12, borderWidth: 1.5, borderColor: '#0F1F33', borderRadius: 3, overflow: 'hidden', backgroundColor: '#fff' }}>
+        {done > 0 && <View style={{ flex: done, backgroundColor: late ? '#DC2626' : '#059669' }} />}
+        {done < 100 && <View style={{ flex: 100 - done }} />}
+      </View>
+      <View style={{ flexDirection: 'row', marginTop: 1 }}>
+        {done > 0 && (
+          <View style={{ flex: Math.max(done, 30), alignItems: 'center' }}>
+            <Text className={`text-2xs font-extrabold ${late ? 'text-red-600' : 'text-emerald-700'}`} numberOfLines={1}>
+              {labels.done.pct} <Text className="font-semibold text-neutral-500">{labels.done.days}</Text>
+            </Text>
+          </View>
+        )}
+        {done < 100 && (
+          <View style={{ flex: Math.max(100 - done, 30), alignItems: 'center' }}>
+            <Text className="text-2xs font-extrabold text-neutral-700" numberOfLines={1}>
+              {labels.remaining.pct} {labels.remaining.days && <Text className="font-semibold text-neutral-500">{labels.remaining.days}</Text>}
+            </Text>
+          </View>
+        )}
+      </View>
+      <Text className={`text-2xs font-semibold ${statusClass}`}>{status.text}</Text>
     </View>
   );
 }
 
-function EntryLine({ row }: { row: DprActivityRow }) {
-  return (
-    <View className="flex-row items-center py-1 border-t border-neutral-100">
-      <Text className="text-2xs font-semibold text-neutral-500 w-14">{formatDayLabel(row.reportDate)}</Text>
-      <Text className="text-2xs font-bold text-emerald-600 w-10">{row.percentComplete != null ? `${row.percentComplete}%` : '—'}</Text>
-      <Text className="text-2xs text-neutral-500 flex-1" numberOfLines={1}>
-        {entryNotes(row).join(' · ')}
-      </Text>
-    </View>
-  );
-}
-
+// Client's layout: stage badge, %, bar, delay line, reasons — nothing else.
+// Stage is as of the report's date, so past weeks show past stages.
 function TaskCard({ task }: { task: DprActivityTask }) {
+  const reasons = delayReasonNames(task.entries);
+  const stageColor = STAGE_COLOR[task.stage];
+  const chipClass = 'flex-row items-center rounded px-1 bg-red-50 border border-red-200';
   return (
     <Pressable
       onPress={() => router.push({ pathname: '/reports/general-parameter-report', params: { taskId: task.taskId } } as never)}
-      className="rounded-xl bg-white border border-neutral-100 px-3 py-2.5 mb-2 active:opacity-70"
+      className="rounded-md bg-white px-2 py-1.5 mb-1 active:opacity-70"
+      style={{ borderWidth: 1.5, borderColor: '#000' }}
     >
       <View className="flex-row items-center">
-        <View className="flex-1 pr-2">
-          <Text className="text-sm font-bold text-neutral-900" numberOfLines={1}>
+        <View className="flex-1 pr-1.5">
+          <Text className="text-xs font-bold text-neutral-900" numberOfLines={1}>
             {task.taskName}
           </Text>
-          <Text className="text-2xs text-neutral-400">
-            {task.taskCode} · {task.workName} · {task.entries.length} DPR{task.entries.length === 1 ? '' : 's'}
-          </Text>
+          <View className="flex-row items-center">
+            <Text className="text-2xs text-neutral-500 flex-shrink" numberOfLines={1}>
+              <Text className="font-bold text-neutral-800">{task.taskCode}</Text> · {task.workName}
+            </Text>
+            <View style={{ marginLeft: 4, borderRadius: 3, paddingHorizontal: 4, backgroundColor: stageColor.bg }}>
+              <Text style={{ color: stageColor.fg, fontSize: 9 }} className="font-extrabold">
+                {TASK_STAGE_LABEL[task.stage]}
+              </Text>
+            </View>
+          </View>
         </View>
-        {task.forecast && <Text className="text-base font-extrabold text-emerald-600 mr-1">{task.forecast.percentDone}%</Text>}
-        <Ionicons name="chevron-forward" size={16} color="#9CA3AF" />
+        {task.forecast && (
+          <Text className={`text-sm font-extrabold ${task.delay.totalDays > 0 ? 'text-red-600' : 'text-emerald-600'}`}>{task.forecast.percentDone}%</Text>
+        )}
+        <Ionicons name="chevron-forward" size={14} color="#9CA3AF" />
       </View>
-      {task.forecast && <ForecastLines f={task.forecast} />}
-      <View className="mt-1.5">
-        {task.entries.map((row, i) => (
-          <EntryLine key={`${row.reportDate}-${i}`} row={row} />
-        ))}
-      </View>
+      {task.forecast && <ProgressBlock f={task.forecast} status={taskDelayStatus(task)} />}
+      {/* Pre Construction: the checklist tabs still pending — tap one for
+          the full checklist. Construction / Post: reason names only — tap
+          the card for the task report with every day's detail. */}
+      {task.stage === 'pre-construction'
+        ? task.pendingPrerequisites.length > 0 && (
+            <View className="flex-row flex-wrap items-center gap-1 mt-1">
+              <Text className="text-2xs font-bold text-neutral-500">Pending:</Text>
+              {task.pendingPrerequisites.map((p) => (
+                <Pressable
+                  key={p.label}
+                  onPress={() => router.push({ pathname: '/task/[taskId]', params: { taskId: task.taskId } })}
+                  className={`${chipClass} active:opacity-70`}
+                >
+                  <Text className="text-2xs font-bold text-red-700">
+                    {p.label} · {p.count}
+                  </Text>
+                  <Ionicons name="chevron-forward" size={9} color="#B91C1C" />
+                </Pressable>
+              ))}
+            </View>
+          )
+        : reasons.length > 0 && (
+            <View className="flex-row flex-wrap items-center gap-1 mt-1">
+              <Text className="text-2xs font-bold text-neutral-500">Reasons:</Text>
+              {reasons.map((r) => (
+                <View key={r} className={chipClass}>
+                  <Text className="text-2xs font-bold text-red-700">{r}</Text>
+                </View>
+              ))}
+            </View>
+          )}
     </Pressable>
   );
 }
@@ -145,9 +197,13 @@ export default function ActivityReportScreen() {
     }
   }, [selectedProjectId, range]);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  // On focus too, not just mount — coming back from an Edit DPR / flowchart
+  // date change shows the new dates, status and progress straight away.
+  useFocusEffect(
+    useCallback(() => {
+      load();
+    }, [load])
+  );
 
   useEffect(() => {
     setExportError(null);
@@ -187,7 +243,7 @@ export default function ActivityReportScreen() {
       />
 
       <ScrollView contentContainerClassName="px-3 pt-3 pb-10">
-        <ReportProjectPicker />
+        <ReportProjectPicker variant="title" />
 
         {!selectedProjectId ? (
           <EmptyState icon="bar-chart-outline" iconColor="#9CA3AF" title="Select a project" subtitle="Pick a project above to generate its report." />
@@ -213,26 +269,32 @@ export default function ActivityReportScreen() {
                   <Text className="text-xs font-semibold text-red-600">Retry</Text>
                 </Pressable>
               </View>
-            ) : !report || report.rows.length === 0 ? (
+            ) : !report || report.tasks.length === 0 ? (
               <EmptyState
                 icon="document-text-outline"
                 iconColor="#9CA3AF"
-                title="No DPR activity"
-                subtitle="No daily progress reports were submitted in this window."
+                title="No tasks yet"
+                subtitle="This project has no tasks on its flowchart yet."
               />
             ) : (
               <>
                 <Text className="text-xs font-bold uppercase tracking-wide text-neutral-400 mb-1.5 px-1">
                   Task-Level Activity ({report.taskCount} task{report.taskCount === 1 ? '' : 's'}) · tap a task for its full report
                 </Text>
-                {report.tasks.map((task) => (
-                  <TaskCard key={task.taskId} task={task} />
-                ))}
-                <View className="rounded-xl bg-neutral-900 px-3 py-2.5 mt-1">
-                  <Text className="text-2xs font-bold uppercase tracking-wide text-white/50 mb-0.5">Cumulative Progress</Text>
-                  <Text className="text-lg font-extrabold text-white">{report.cumulativePercent != null ? `${report.cumulativePercent}%` : '—'}</Text>
-                  {report.overallForecast && <ForecastLines f={report.overallForecast} dark />}
-                </View>
+                {(['pre-construction', 'construction', 'post-construction'] as const).map((stage) => {
+                  const inStage = report.tasks.filter((t) => t.stage === stage);
+                  if (inStage.length === 0) return null;
+                  return (
+                    <View key={stage}>
+                      <Text className="text-xs font-extrabold mt-0.5 mb-0.5 px-1" style={{ color: STAGE_COLOR[stage].fg }}>
+                        {TASK_STAGE_LABEL[stage]} ({inStage.length})
+                      </Text>
+                      {inStage.map((task) => (
+                        <TaskCard key={task.taskId} task={task} />
+                      ))}
+                    </View>
+                  );
+                })}
 
                 <Pressable
                   onPress={handleExport}

@@ -31,6 +31,7 @@ import {
   updateTaskStatusRpc,
   uploadDailyProgressPhoto,
   upsertTodayDprEntry,
+  withNextDprDay,
   type DailyProgressPhoto,
   type DprComment,
   type DprDependencyCategory,
@@ -88,6 +89,9 @@ export default function DprEditScreen() {
   const { state } = useAuth();
   const profile = state.status === 'signed-in' ? state.profile : null;
   const userId = profile?.id ?? null;
+  // Admin can correct a DPR after it's been submitted (or the task
+  // completed): edit the actual dates and submit the day again.
+  const isAdmin = profile?.role === 'admin';
 
   const [task, setTask] = useState<DprTask | null>(null);
   const [projectId, setProjectId] = useState<string | null>(null);
@@ -232,10 +236,36 @@ export default function DprEditScreen() {
     setValidationError(null);
   }, [index, entries, dayShareExact]);
 
+  // Late start — the planned start passed with no work begun (still
+  // Pending), or the Actual Start Date entered is after the planned start.
+  // Shown as a red "Pending — not started" note and the Reason for Delay
+  // picker opens up so the why gets recorded on the DPR.
+  const plannedStartKey = task?.plannedStartDate?.slice(0, 10) ?? null;
+  const actualStartKey = task?.actualStartDate?.slice(0, 10) ?? null;
+  const startDelayDays = plannedStartKey ? dayGap(plannedStartKey, actualStartKey ?? todayDateKey()) : 0;
+  const lateStart = task != null && task.status !== 'completed' && startDelayDays > 0 && (actualStartKey != null || isDprPending(task.status));
+  const reasonEnabled = task?.status === 'on_hold' || lateStart;
+  const previousReasons = index > 0 ? entries[index - 1]?.fields : null;
+
+  function copyPreviousDayReason() {
+    if (!previousReasons) return;
+    setOtherText(previousReasons.dependencyOtherText ?? '');
+    void persistDraft({
+      ...draft,
+      dependencyCategories: previousReasons.dependencyCategories,
+      dependencyOtherText: previousReasons.dependencyOtherText,
+      comment: previousReasons.comment ?? draft.comment,
+    });
+  }
+
   const suggestedPerDay = plannedDurationDays && plannedDurationDays > 0 ? Math.round(100 / plannedDurationDays) : null;
   const WORKING_HOURS_PER_DAY = 8;
 
-  const totalCompletedPercent = delayData?.cumulativePercentComplete ?? null;
+  // Sum of every day's % (each DPR is that day's share of the work) —
+  // straight from the days on screen, so an edit shows up immediately.
+  const filledEntries = entries.filter((e) => e.fields.percentComplete != null);
+  const totalCompletedPercent =
+    filledEntries.length > 0 ? Math.min(100, filledEntries.reduce((sum, e) => sum + (e.fields.percentComplete ?? 0), 0)) : null;
   const totalPendingPercent = totalCompletedPercent != null ? 100 - totalCompletedPercent : null;
   // Real average pace so far (not the fixed planned rate) — total % actually
   // completed divided by how many real days have a filled-in % — by explicit
@@ -255,10 +285,40 @@ export default function DprEditScreen() {
     if (!current || !taskId) return;
     try {
       await upsertTodayDprEntry(taskId, current.reportDate, next, userId);
-      setEntries((prev) => prev.map((e, i) => (i === index ? { ...e, fields: next } : e)));
+      const nextEntries = withNextDprDay(entries.map((e, i) => (i === index ? { ...e, fields: next } : e)));
+      setEntries(nextEntries);
+      await syncStatusWithProgress(nextEntries);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  // Keep the task's status/actual end in step with the DPR total, so an
+  // edit (including an admin re-edit later) shows correctly everywhere:
+  // reaching 100% completes the task on that day; dropping back under 100%
+  // reopens a completed task. Best-effort — the DPR itself is already saved
+  // and update_task_status may refuse a transition.
+  async function syncStatusWithProgress(list: DprHistoryEntry[]) {
+    if (!taskId || !task) return;
+    const total = list.reduce((sum, e) => sum + (e.fields.percentComplete ?? 0), 0);
+    try {
+      if (total >= 100 && task.status !== 'completed') {
+        let running = 0;
+        const finishIndex = list.findIndex((e) => (running += e.fields.percentComplete ?? 0) >= 100);
+        if (!task.actualEndDate && finishIndex >= 0) {
+          await updateTaskActualDate(taskId, 'actual_end_date', dprDayDate(finishIndex, list[finishIndex].reportDate).toISOString().slice(0, 10));
+        }
+        await updateTaskStatusRpc(taskId, 'completed');
+      } else if (total < 100 && task.status === 'completed') {
+        await updateTaskActualDate(taskId, 'actual_end_date', null);
+        await updateTaskStatusRpc(taskId, 'in_progress');
+      } else {
+        return;
+      }
+    } catch (err) {
+      setStatusError(err instanceof Error ? err.message : String(err));
+    }
+    await refreshTaskOnly();
   }
 
   async function saveDayFields() {
@@ -326,6 +386,27 @@ export default function DprEditScreen() {
     await refreshTaskOnly();
   }
 
+  const [dateError, setDateError] = useState<string | null>(null);
+
+  // Admin date edits. Setting an Actual End completes the task; clearing it
+  // reopens it — so status, report bar and stage all follow the dates.
+  async function handleSetActualDate(field: 'actual_start_date' | 'actual_end_date', isoDate: string | null) {
+    if (!taskId) return;
+    setDateError(null);
+    try {
+      if (field === 'actual_start_date' && isoDate) await handleSetActualStart(isoDate);
+      else {
+        await updateTaskActualDate(taskId, field, isoDate);
+        if (field === 'actual_end_date' && isoDate && task?.status !== 'completed') await updateTaskStatusRpc(taskId, 'completed');
+        if (field === 'actual_end_date' && !isoDate && task?.status === 'completed') await updateTaskStatusRpc(taskId, 'in_progress');
+        await refreshTaskOnly();
+      }
+      reloadDelayData();
+    } catch (err) {
+      setDateError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   // Quantity of Work — by explicit request, entered per DPR day as a plain
   // percentage of THAT day's work (0-100). Each planned day is an equal share
   // of the task's 100% (4 days -> 25% each), so the day's real contribution
@@ -372,7 +453,7 @@ export default function DprEditScreen() {
     if (isDprPending(task.status)) {
       // Reason for Delay is only actually pickable while On Hold (Pending
       // shows it disabled) — see the render below — so only require it then.
-      if (task.status === 'on_hold' && draft.dependencyCategories.length === 0) missing.push('Reason for Delay');
+      if (reasonEnabled && draft.dependencyCategories.length === 0) missing.push('Reason for Delay');
       if (!draft.comment) missing.push('Comments');
     }
     if (missing.length > 0) {
@@ -532,6 +613,26 @@ export default function DprEditScreen() {
                 <Text className="text-2xs text-amber-600 mb-3">Not filled yet — add this day&apos;s update below.</Text>
               )}
 
+              {lateStart && plannedStartKey && (
+                <View className="mb-3 rounded-lg px-2.5 py-2 border" style={{ backgroundColor: '#FEF2F2', borderColor: '#FECACA' }}>
+                  <Text className="text-xs font-extrabold" style={{ color: '#B91C1C' }}>
+                    {actualStartKey ? `Started ${startDelayDays} day${startDelayDays === 1 ? '' : 's'} late` : 'Pending — not started'}
+                  </Text>
+                  <Text className="text-2xs mt-0.5" style={{ color: '#B91C1C' }}>
+                    Planned start {formatDateLabel(new Date(`${plannedStartKey}T00:00:00Z`))}
+                    {actualStartKey
+                      ? ` · actual start ${formatDateLabel(new Date(`${actualStartKey}T00:00:00Z`))}`
+                      : ` · ${startDelayDays} day${startDelayDays === 1 ? '' : 's'} delayed so far`}
+                  </Text>
+                  <Text className="text-2xs mt-0.5 font-semibold" style={{ color: '#B91C1C' }}>
+                    Reason:{' '}
+                    {draft.dependencyCategories.length > 0
+                      ? draft.dependencyCategories.map((c) => dependencyDisplayLabel(c, draft.dependencyOtherText)).join(', ')
+                      : 'not given yet — pick it in Reason for Delay below'}
+                  </Text>
+                </View>
+              )}
+
               {delayLoading && (
                 <View className="mb-3 items-center py-3">
                   <ActivityIndicator color="#0F1F33" size="small" />
@@ -590,12 +691,40 @@ export default function DprEditScreen() {
                   when the day has subtasks, each subtask's own date (above) is
                   it, and the task's date follows the earliest of them; this
                   task-level picker only shows for a day with no subtasks. */}
-              {(subtasksByDate[current.reportDate] ?? []).length === 0 && (
-                <View className="mb-3">
-                  <Text className="text-xs text-neutral-400 mb-1">Actual Start Date</Text>
-                  <DateField value={task.actualStartDate} onChange={handleSetActualStart} maxDate={new Date().toISOString().slice(0, 10)} />
+              {isAdmin ? (
+                <View className="mb-3 flex-row gap-2">
+                  <View className="flex-1">
+                    <Text className="text-xs text-neutral-400 mb-1">Actual Start Date</Text>
+                    <DateField
+                      value={task.actualStartDate}
+                      onChange={(d) => void handleSetActualDate('actual_start_date', d)}
+                      maxDate={task.actualEndDate ?? new Date().toISOString().slice(0, 10)}
+                    />
+                  </View>
+                  <View className="flex-1">
+                    <Text className="text-xs text-neutral-400 mb-1">Actual End Date</Text>
+                    <DateField
+                      value={task.actualEndDate}
+                      onChange={(d) => void handleSetActualDate('actual_end_date', d)}
+                      minDate={task.actualStartDate}
+                      maxDate={new Date().toISOString().slice(0, 10)}
+                    />
+                    {task.actualEndDate && (
+                      <Pressable onPress={() => void handleSetActualDate('actual_end_date', null)} hitSlop={6} className="self-start mt-1">
+                        <Text className="text-2xs font-bold text-red-600">Clear end date</Text>
+                      </Pressable>
+                    )}
+                  </View>
                 </View>
+              ) : (
+                (subtasksByDate[current.reportDate] ?? []).length === 0 && (
+                  <View className="mb-3">
+                    <Text className="text-xs text-neutral-400 mb-1">Actual Start Date</Text>
+                    <DateField value={task.actualStartDate} onChange={handleSetActualStart} maxDate={new Date().toISOString().slice(0, 10)} />
+                  </View>
+                )
               )}
+              {dateError && <Text className="text-2xs text-red-600 -mt-2 mb-3">{dateError}</Text>}
 
               <View className="mb-3">
                 <Text className="text-xs text-neutral-400 mb-1">Quantity of Work</Text>
@@ -695,13 +824,13 @@ export default function DprEditScreen() {
                 <View className="flex-1" style={{ zIndex: statusDropdownOpen ? 10 : undefined }}>
                   <Text className="text-xs text-neutral-400 mb-1">Status</Text>
                   <Pressable
-                    onPress={() => task.status !== 'completed' && setStatusDropdownOpen((v) => !v)}
+                    onPress={() => (task.status !== 'completed' || isAdmin) && setStatusDropdownOpen((v) => !v)}
                     disabled={changingStatus}
                     className="flex-row items-center justify-between border border-neutral-200 rounded-lg px-2.5 py-2"
                     style={{ opacity: changingStatus ? 0.5 : 1 }}
                   >
                     <Text className="text-xs font-bold text-neutral-900">{STATUS_DISPLAY_LABEL[task.status]}</Text>
-                    {task.status !== 'completed' && <Text className="text-2xs text-neutral-400">{statusDropdownOpen ? '▲' : '▼'}</Text>}
+                    {(task.status !== 'completed' || isAdmin) && <Text className="text-2xs text-neutral-400">{statusDropdownOpen ? '▲' : '▼'}</Text>}
                   </Pressable>
                   {/* Expands in normal flow (pushes everything below it down)
                       rather than floating over it — by explicit correction,
@@ -731,7 +860,7 @@ export default function DprEditScreen() {
                   {statusError && <Text className="text-2xs text-red-600 mt-1">{statusError}</Text>}
                 </View>
 
-                {isDprPending(task.status) && (
+                {(isDprPending(task.status) || lateStart) && (
                   <View className="flex-1">
                     <Text className="text-xs text-neutral-400 mb-1">
                       Reason for Delay<Text style={{ color: '#DC2626' }}> *</Text>
@@ -743,11 +872,11 @@ export default function DprEditScreen() {
                         letting you log a delay reason before there's an
                         actual delay. */}
                     <Pressable
-                      onPress={() => task.status === 'on_hold' && setDelayDropdownOpen((v) => !v)}
+                      onPress={() => reasonEnabled && setDelayDropdownOpen((v) => !v)}
                       className="flex-row items-center justify-between border rounded-lg px-2.5 py-2"
                       style={{
                         borderColor: draft.dependencyCategories.length === 0 ? '#FECACA' : '#E5E5E5',
-                        opacity: task.status === 'on_hold' ? 1 : 0.5,
+                        opacity: reasonEnabled ? 1 : 0.5,
                       }}
                     >
                       <Text className="text-xs text-neutral-900 flex-1" numberOfLines={1}>
@@ -755,9 +884,9 @@ export default function DprEditScreen() {
                           ? 'Select reason(s)'
                           : draft.dependencyCategories.map((c) => dependencyDisplayLabel(c, draft.dependencyOtherText)).join(', ')}
                       </Text>
-                      {task.status === 'on_hold' && <Text className="text-2xs text-neutral-400">{delayDropdownOpen ? '▲' : '▼'}</Text>}
+                      {reasonEnabled && <Text className="text-2xs text-neutral-400">{delayDropdownOpen ? '▲' : '▼'}</Text>}
                     </Pressable>
-                    {task.status === 'on_hold' && delayDropdownOpen && (
+                    {reasonEnabled && delayDropdownOpen && (
                       <View className="mt-1 border border-neutral-100 rounded-lg overflow-hidden">
                         {DPR_DEPENDENCY_CATEGORIES.map((cat, i) => {
                           const active = draft.dependencyCategories.includes(cat);
@@ -777,7 +906,7 @@ export default function DprEditScreen() {
                         })}
                       </View>
                     )}
-                    {task.status === 'on_hold' && draft.dependencyCategories.includes('other') && (
+                    {reasonEnabled && draft.dependencyCategories.includes('other') && (
                       <TextInput
                         value={otherText}
                         onChangeText={setOtherText}
@@ -792,6 +921,20 @@ export default function DprEditScreen() {
                   </View>
                 )}
               </View>
+
+              {previousReasons && (previousReasons.dependencyCategories.length > 0 || previousReasons.comment) && (
+                <Pressable
+                  onPress={copyPreviousDayReason}
+                  className="flex-row items-center gap-1.5 self-start mb-3 px-2.5 py-1.5 rounded-lg bg-neutral-50 border border-neutral-200"
+                >
+                  <Ionicons name="copy-outline" size={14} color="#0F1F33" />
+                  <Text className="text-2xs font-bold text-brand-navy">
+                    Same reason as previous day
+                    {previousReasons.dependencyCategories.length > 0 &&
+                      ` (${previousReasons.dependencyCategories.map((c) => dependencyDisplayLabel(c, previousReasons.dependencyOtherText)).join(', ')})`}
+                  </Text>
+                </Pressable>
+              )}
 
               <Pressable
                 onPress={handleSaveDraft}
@@ -878,8 +1021,8 @@ export default function DprEditScreen() {
                 {photoError && <Text className="text-2xs text-red-600 mt-1.5">{photoError}</Text>}
               </View>
 
-              {task.status !== 'completed' && (
-                draft.dprSubmittedAtISO ? (
+              {(task.status !== 'completed' || isAdmin) && (
+                draft.dprSubmittedAtISO && !isAdmin ? (
                   <View className="mt-3 py-2.5 rounded-xl items-center bg-neutral-100">
                     <Text className="text-sm font-bold text-neutral-500">
                       Submitted · {formatDateTimeLabel(new Date(draft.dprSubmittedAtISO))}
@@ -893,7 +1036,7 @@ export default function DprEditScreen() {
                     style={{ backgroundColor: '#0F1F33', opacity: submitting ? 0.6 : 1 }}
                   >
                     {submitting && <ActivityIndicator size="small" color="#fff" />}
-                    <Text className="text-sm font-bold text-white">Submit DPR</Text>
+                    <Text className="text-sm font-bold text-white">{draft.dprSubmittedAtISO ? 'Resubmit DPR' : 'Submit DPR'}</Text>
                   </Pressable>
                 )
               )}
